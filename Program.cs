@@ -27,7 +27,7 @@ class Program
     {
         // Create window, GraphicsDevice, and all resources necessary for the demo.
         VeldridStartup.CreateWindowAndGraphicsDevice(
-            new WindowCreateInfo(1920/3, 1080/3, 512+128, 512, WindowState.Normal, "QuickConverter"),
+            new WindowCreateInfo(1920/3, 1080/3, 900, 600, WindowState.Normal, "QuickConverter"),
             new GraphicsDeviceOptions(true, null, true, ResourceBindingModel.Improved, true, true),
             out _window,
             out _gd);
@@ -77,27 +77,11 @@ class Program
     static string _statusText = "Hi!";
     static string _outputFileURL = "";
     
+    static readonly List<ConversionReport> reports = [];
+    
     static readonly Vector2 _convertButtonSize = new(120, 19);
     
-    static int _oggVBROptionIndex = 2;
-    static readonly string[] _oggVBROptions = [
-        "500-1000 kbit/s",
-        "320-500 kbit/s",
-        "256-320 kbit/s",
-        "224-256 kbit/s",
-        "192-224 kbit/s",
-        "160-192 kbit/s",
-        "128-160 kbit/s",
-        "112-128 kbit/s",
-        "96-112 kbit/s",
-        "80-96 kbit/s",
-        "64-80 kbit/s",
-        "48-64 kbit/s",
-        "32-64 kbit/s",
-    ];
-    static readonly int[] _VBROptionIndexToNumber = [
-        10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, -1, -2,
-    ];
+    static int _oggVBRBitrate = 192;
     
     static bool _mp3VBR = true;
     
@@ -157,11 +141,11 @@ class Program
     
     static int _aacVBROptionIndex = 1;
     static readonly string[] _aacVBROptions = [
-        "Highest quality (0.1)",
-        "Excellent quality (1.0)",
-        "Very good quality (2.0)",
-        "Good quality (3.0)",
-        "Fair quality (4.0)",
+        "Highest (0.1)",
+        "Excellent (1.0)",
+        "Very good (2.0)",
+        "Good (3.0)",
+        "Fair (4.0)",
     ];
     static readonly double[] _aacVBRQualityValues = [
         0.1,
@@ -217,20 +201,23 @@ class Program
     
     private static void SubmitUI()
     {
-        const ImGuiWindowFlags fullscreenWindowFlags =
-            ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings;
+        const ImGuiWindowFlags windowFlags =
+            ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoDecoration;
         
         var viewport = ImGui.GetMainViewport();
-        ImGui.SetNextWindowPos(viewport.WorkPos);
-        ImGui.SetNextWindowSize(viewport.WorkSize);
         
-        ImGui.Begin("Main Window", fullscreenWindowFlags);
+        // --- LEFT PANEL ---
+        
+        var leftWidth = viewport.WorkSize.X * 2f / 3f;
+        var rightWidth = viewport.WorkSize.X * 1f / 3f;
+        
+        ImGui.SetNextWindowPos(viewport.WorkPos);
+        ImGui.SetNextWindowSize(new Vector2(leftWidth, viewport.WorkSize.Y));
+        
+        ImGui.Begin("Left Panel", windowFlags);
         
         var style = ImGui.GetStyle();
         style.ItemSpacing = new(style.ItemSpacing.X, 6);
-        
-        ImGui.BeginDisabled(_processing);
-        ImGui.BeginChild("MainContent", ImGui.GetContentRegionAvail() - new Vector2(0, 30));
         
         if (ImGui.BeginTabBar("MainTabs"))
         {
@@ -249,28 +236,25 @@ class Program
             ImGui.EndTabBar();
         }
         
-        ImGui.EndChild();
-        ImGui.EndDisabled();
+        ImGui.End();
         
-        ImGui.Separator();
+        // --- RIGHT PANEL ---
         
-        if (_processing)
+        ImGui.SameLine();
+        
+        ImGui.SetNextWindowPos(viewport.WorkPos + new Vector2(leftWidth, 0));
+        ImGui.SetNextWindowSize(new Vector2(rightWidth, viewport.WorkSize.Y));
+        
+        ImGui.Begin("Right Panel", windowFlags);
+
+        if (reports.Count == 0)
         {
-            ImGui.ProgressBar((float)(_progress * .01), new(200.0f, 0.0f), _progress.ToString("0") + "%");
-            ImGui.SameLine();
-            ImGui.Text($"Processing to {_selectedContAndCodecStr}...");
+            ImGui.TextColored(new Vector4(1, 1, 1, 0.5f), "No conversion reports...");
         }
-        else
+
+        for (int i = reports.Count - 1; i >= 0; i--)
         {
-            ImGui.Text(_statusText);
-            
-            if (!string.IsNullOrEmpty(_outputFileURL))
-            {
-                ImGui.SameLine();
-                ImGui.TextLinkOpenURL("Click to open file.", _outputFileURL);
-                ImGui.SameLine();
-                ImGui.TextLinkOpenURL("Click to open directory.", Path.GetDirectoryName(_outputFileURL));
-            }
+            reports[i].SubmitUI();
         }
         
         ImGui.End();
@@ -279,8 +263,15 @@ class Program
     static string _selectedContainerStr = "mp4";
     static string _selectedContAndCodecStr = "mp4-h264";
     
-    private static void AudioUI()
+    unsafe private static void AudioUI()
     {
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + 400);
+        ImGui.TextWrapped("Recommendations:\n" +
+            "- Editing: any uncompressed;\n" +
+            "- Listening: OGG Vorbis 320 kbit/s;\n" +
+            "- Compatibility: MP3.");
+        ImGui.PopTextWrapPos();
+        
         if (ImGui.CollapsingHeader("To uncompressed audio file formats", ImGuiTreeNodeFlags.DefaultOpen))
         {
             if (ImGui.TreeNode("Info##uncompressed"))
@@ -314,28 +305,25 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_wav-output.wav"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "wav";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
                     
                     var argumentProcessor = FFMpegArguments
                         .FromFileInput(filePath)
                         .OutputToFile(newFilePath, false);
-                        
-                    var totalTime = FFProbe.Analyse(filePath).Duration;
-                    argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                    argumentProcessor.NotifyOnError(Console.WriteLine);
-                        
-                    _progress = 0;
                     
-                    argumentProcessor
-                        .ProcessAsynchronously()
-                        .ContinueWith(_ =>
-                        {
-                            _processing = false;
-                            _statusText = "Converted to wav.";
-                            _outputFileURL = newFilePath;
-                        });
+                    var report = new ConversionReport(
+                        inputContainer, 
+                        inputAudioCodec, 
+                        "wav", 
+                        "pcm_s16le", 
+                        filePath, 
+                        newFilePath, 
+                        argumentProcessor,
+                        report => reports.Remove(report));
+                    
+                    reports.Add(report);
                 }
             }
             
@@ -345,28 +333,25 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_aiff-output.aiff"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "aiff";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     var argumentProcessor = FFMpegArguments
                         .FromFileInput(filePath)
                         .OutputToFile(newFilePath, false);
-                        
-                    var totalTime = FFProbe.Analyse(filePath).Duration;
-                    argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                    argumentProcessor.NotifyOnError(Console.WriteLine);
-                        
-                    _progress = 0;
                     
-                    argumentProcessor
-                        .ProcessAsynchronously()
-                        .ContinueWith(_ =>
-                        {
-                            _processing = false;
-                            _statusText = "Converted to aiff.";
-                            _outputFileURL = newFilePath;
-                        });
+                    var report = new ConversionReport(
+                        inputContainer, 
+                        inputAudioCodec, 
+                        "aiff", 
+                        "pcm_s16be", 
+                        filePath, 
+                        newFilePath, 
+                        argumentProcessor,
+                        report => reports.Remove(report));
+                    
+                    reports.Add(report);
                 }
             }
 
@@ -374,28 +359,25 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_pcm-output.pcm"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "pcm";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     var argumentProcessor = FFMpegArguments
                         .FromFileInput(filePath)
                         .OutputToFile(newFilePath, false);
-                        
-                    var totalTime = FFProbe.Analyse(filePath).Duration;
-                    argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                    argumentProcessor.NotifyOnError(Console.WriteLine);
-                        
-                    _progress = 0;
                     
-                    argumentProcessor
-                        .ProcessAsynchronously()
-                        .ContinueWith(_ =>
-                        {
-                            _processing = false;
-                            _statusText = "Converted to pcm.";
-                            _outputFileURL = newFilePath;
-                        });
+                    var report = new ConversionReport(
+                        inputContainer, 
+                        inputAudioCodec, 
+                        "pcm", 
+                        "pcm_s16le", 
+                        filePath, 
+                        newFilePath, 
+                        argumentProcessor,
+                        report => reports.Remove(report));
+                    
+                    reports.Add(report);
                 }
             }
 
@@ -405,28 +387,25 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_raw-output.raw"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "raw";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     var argumentProcessor = FFMpegArguments
                         .FromFileInput(filePath)
                         .OutputToFile(newFilePath, false);
-                        
-                    var totalTime = FFProbe.Analyse(filePath).Duration;
-                    argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                    argumentProcessor.NotifyOnError(Console.WriteLine);
-                        
-                    _progress = 0;
                     
-                    argumentProcessor
-                        .ProcessAsynchronously()
-                        .ContinueWith(_ =>
-                        {
-                            _processing = false;
-                            _statusText = "Converted to raw.";
-                            _outputFileURL = newFilePath;
-                        });
+                    var report = new ConversionReport(
+                        inputContainer, 
+                        inputAudioCodec, 
+                        "raw", 
+                        "pcm_s16le", 
+                        filePath, 
+                        newFilePath, 
+                        argumentProcessor,
+                        report => reports.Remove(report));
+                    
+                    reports.Add(report);
                 }
             }
             
@@ -457,28 +436,25 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_flac-output.flac"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "flac";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
                     
                     var argumentProcessor = FFMpegArguments
                         .FromFileInput(filePath)
                         .OutputToFile(newFilePath, false);
-                        
-                    var totalTime = FFProbe.Analyse(filePath).Duration;
-                    argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                    argumentProcessor.NotifyOnError(Console.WriteLine);
-                        
-                    _progress = 0;
                     
-                    argumentProcessor
-                        .ProcessAsynchronously()
-                        .ContinueWith(_ =>
-                        {
-                            _processing = false;
-                            _statusText = "Converted to flac.";
-                            _outputFileURL = newFilePath;
-                        });
+                    var report = new ConversionReport(
+                        inputContainer, 
+                        inputAudioCodec, 
+                        "flac", 
+                        "flac", 
+                        filePath, 
+                        newFilePath, 
+                        argumentProcessor,
+                        report => reports.Remove(report));
+                    
+                    reports.Add(report);
                 }
             }
             
@@ -488,29 +464,26 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_alac-output.m4a"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "alac";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     var argumentProcessor = FFMpegArguments
                         .FromFileInput(filePath)
                         .OutputToFile(newFilePath, false, options => options
                             .WithCustomArgument("-c:a alac -movflags +faststart"));
-                            
-                    var totalTime = FFProbe.Analyse(filePath).Duration;
-                    argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                    argumentProcessor.NotifyOnError(Console.WriteLine);
-                        
-                        _progress = 0;
                     
-                    argumentProcessor
-                        .ProcessAsynchronously()
-                        .ContinueWith(_ =>
-                        {
-                            _processing = false;
-                            _statusText = "Converted to alac.";
-                            _outputFileURL = newFilePath;
-                        });
+                    var report = new ConversionReport(
+                        inputContainer, 
+                        inputAudioCodec, 
+                        "m4a", 
+                        "alac", 
+                        filePath, 
+                        newFilePath, 
+                        argumentProcessor,
+                        report => reports.Remove(report));
+                    
+                    reports.Add(report);
                 }
             }
             
@@ -523,11 +496,11 @@ class Program
             {
                 ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + 400);
                 ImGui.TextWrapped("These formats use lossy compression, greatly reducing file size while " +
-                    "sacrificing some quality. They are common for streaming, distribution, and general playback.");
+                    "sacrificing some quality. They are common for streaming and high-fidelity playback.");
 
                 ImGui.TextLinkOpenURL("MP3", "https://en.wikipedia.org/wiki/MP3");
                 ImGui.SameLine();
-                ImGui.TextWrapped("- Old but very common.");
+                ImGui.TextWrapped("- Old but very common, will run on anything.");
 
                 ImGui.TextLinkOpenURL("M4A (AAC)", "https://en.wikipedia.org/wiki/MP4_file_format");
                 ImGui.SameLine();
@@ -535,11 +508,11 @@ class Program
 
                 ImGui.TextLinkOpenURL("AAC", "https://en.wikipedia.org/wiki/Advanced_Audio_Coding");
                 ImGui.SameLine();
-                ImGui.TextWrapped("- Successor to MP3, patent-encumbered.");
+                ImGui.TextWrapped("- Successor to MP3, patent-encumbered, very common.");
 
-                ImGui.TextLinkOpenURL("OGG", "https://en.wikipedia.org/wiki/Vorbis");
+                ImGui.TextLinkOpenURL("OGG Opus", "https://en.wikipedia.org/wiki/Opus_(audio_format)");
                 ImGui.SameLine();
-                ImGui.TextWrapped("- Vorbis in OGG container, open-source.");
+                ImGui.TextWrapped("- Opus in OGG container, the best lossy codec + it's open-source.");
                 
                 ImGui.PopTextWrapPos();
                 ImGui.TreePop();
@@ -549,9 +522,9 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_mp3-output.mp3"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "mp3";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     if (_mp3VBR)
                     {
@@ -560,21 +533,18 @@ class Program
                             .OutputToFile(newFilePath, false, options => options
                                 .WithAudioCodec(AudioCodec.LibMp3Lame)
                                 .WithCustomArgument($"-qscale:a {_mp3VBROptionIndex}"));
-                                
-                        var totalTime = FFProbe.Analyse(filePath).Duration;
-                        argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                        argumentProcessor.NotifyOnError(Console.WriteLine);
                         
-                        _progress = 0;
+                        var report = new ConversionReport(
+                            inputContainer, 
+                            inputAudioCodec, 
+                            "mp3", 
+                            "mp3", 
+                            filePath, 
+                            newFilePath, 
+                            argumentProcessor,
+                        report => reports.Remove(report));
                         
-                        argumentProcessor
-                            .ProcessAsynchronously()
-                            .ContinueWith(_ =>
-                            {
-                                _processing = false;
-                                _statusText = "Converted to mp3.";
-                                _outputFileURL = newFilePath;
-                            });
+                        reports.Add(report);
                     }
                     else
                     {
@@ -583,21 +553,18 @@ class Program
                             .OutputToFile(newFilePath, false, options => options
                                 .WithAudioCodec(AudioCodec.LibMp3Lame)
                                 .WithCustomArgument($"-b:a {_mp3CBRIndexToBitrate[_mp3CBROptionIndex]}k"));
-                                
-                        var totalTime = FFProbe.Analyse(filePath).Duration;
-                        argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                        argumentProcessor.NotifyOnError(Console.WriteLine);
                         
-                        _progress = 0;
+                        var report = new ConversionReport(
+                            inputContainer, 
+                            inputAudioCodec, 
+                            "mp3", 
+                            "mp3", 
+                            filePath, 
+                            newFilePath, 
+                            argumentProcessor,
+                        report => reports.Remove(report));
                         
-                        argumentProcessor
-                            .ProcessAsynchronously()
-                            .ContinueWith(_ =>
-                            {
-                                _processing = false;
-                                _statusText = "Converted to mp3.";
-                                _outputFileURL = newFilePath;
-                            });
+                        reports.Add(report);
                     }
                 }
             }
@@ -616,9 +583,9 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_m4a-output.m4a"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "m4a";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     if (_aacVBR)
                     {
@@ -627,21 +594,18 @@ class Program
                             .OutputToFile(newFilePath, false, options => options
                                 .WithAudioCodec(AudioCodec.Aac)
                                 .WithCustomArgument($"-q:a {_aacVBRQualityValues[_aacVBROptionIndex]}"));
-                                
-                        var totalTime = FFProbe.Analyse(filePath).Duration;
-                        argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                        argumentProcessor.NotifyOnError(Console.WriteLine);
                         
-                        _progress = 0;
+                        var report = new ConversionReport(
+                            inputContainer, 
+                            inputAudioCodec, 
+                            "m4a", 
+                            "aac", 
+                            filePath, 
+                            newFilePath, 
+                            argumentProcessor,
+                        report => reports.Remove(report));
                         
-                        argumentProcessor
-                            .ProcessAsynchronously()
-                            .ContinueWith(_ =>
-                            {
-                                _processing = false;
-                                _statusText = "Converted to m4a.";
-                                _outputFileURL = newFilePath;
-                            });
+                        reports.Add(report);
                     }
                     else
                     {
@@ -650,21 +614,18 @@ class Program
                             .OutputToFile(newFilePath, false, options => options
                                 .WithAudioCodec(AudioCodec.Aac)
                                 .WithCustomArgument($"-b:a {_aacCBRIndexToBitrate[_aacCBROptionIndex]}k"));
-                                
-                        var totalTime = FFProbe.Analyse(filePath).Duration;
-                        argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                        argumentProcessor.NotifyOnError(Console.WriteLine);
                         
-                        _progress = 0;
+                        var report = new ConversionReport(
+                            inputContainer, 
+                            inputAudioCodec, 
+                            "m4a", 
+                            "aac", 
+                            filePath, 
+                            newFilePath, 
+                            argumentProcessor,
+                        report => reports.Remove(report));
                         
-                        argumentProcessor
-                            .ProcessAsynchronously()
-                            .ContinueWith(_ =>
-                            {
-                                _processing = false;
-                                _statusText = "Converted to m4a.";
-                                _outputFileURL = newFilePath;
-                            });
+                        reports.Add(report);
                     }
                 }
             }
@@ -675,9 +636,9 @@ class Program
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_aac-output.aac"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "aac";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     if (_aacVBR)
                     {
@@ -686,21 +647,18 @@ class Program
                             .OutputToFile(newFilePath, false, options => options
                                 .WithAudioCodec(AudioCodec.Aac)
                                 .WithCustomArgument($"-q:a {_aacVBRQualityValues[_aacVBROptionIndex]}"));
-                                
-                        var totalTime = FFProbe.Analyse(filePath).Duration;
-                        argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                        argumentProcessor.NotifyOnError(Console.WriteLine);
                         
-                        _progress = 0;
+                        var report = new ConversionReport(
+                            inputContainer, 
+                            inputAudioCodec, 
+                            "aac", 
+                            "aac", 
+                            filePath, 
+                            newFilePath, 
+                            argumentProcessor,
+                        report => reports.Remove(report));
                         
-                        argumentProcessor
-                            .ProcessAsynchronously()
-                            .ContinueWith(_ =>
-                            {
-                                _processing = false;
-                                _statusText = "Converted to aac.";
-                                _outputFileURL = newFilePath;
-                            });
+                        reports.Add(report);
                     }
                     else
                     {
@@ -709,21 +667,18 @@ class Program
                             .OutputToFile(newFilePath, false, options => options
                                 .WithAudioCodec(AudioCodec.Aac)
                                 .WithCustomArgument($"-b:a {_aacCBRIndexToBitrate[_aacCBROptionIndex]}k"));
-                                
-                        var totalTime = FFProbe.Analyse(filePath).Duration;
-                        argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                        argumentProcessor.NotifyOnError(Console.WriteLine);
                         
-                        _progress = 0;
+                        var report = new ConversionReport(
+                            inputContainer, 
+                            inputAudioCodec, 
+                            "aac", 
+                            "aac", 
+                            filePath, 
+                            newFilePath, 
+                            argumentProcessor,
+                        report => reports.Remove(report));
                         
-                        argumentProcessor
-                            .ProcessAsynchronously()
-                            .ContinueWith(_ =>
-                            {
-                                _processing = false;
-                                _statusText = "Converted to aac.";
-                                _outputFileURL = newFilePath;
-                            });
+                        reports.Add(report);
                     }
                 }
             }
@@ -731,57 +686,54 @@ class Program
             ImGui.SameLine();
             ImGui.Checkbox("VBR##aac", ref _aacVBR);
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(150);
+            ImGui.SetNextItemWidth(130);
             
             if (_aacVBR)
                 ImGui.Combo("Quality##aac", ref _aacVBROptionIndex, _aacVBROptions, _aacVBROptions.Length);
             else
                 ImGui.Combo("Bitrate##aac", ref _aacCBROptionIndex, _aacCBROptions, _aacCBROptions.Length);
             
-            if (ImGui.Button("To OGG Vorbis", _convertButtonSize))
+            if (ImGui.Button("To OGG (Opus)", _convertButtonSize))
             {
                 if (SelectFile(out var filePath, out var newFilePath, "_ogg-output.ogg"))
                 {
-                    _processing = true;
-                    _outputFileURL = "";
-                    _selectedContAndCodecStr = "ogg";
+                    var inputFileInfo = FFProbe.Analyse(filePath);
+                    var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                    var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
 
                     var argumentProcessor = FFMpegArguments
                         .FromFileInput(filePath)
                         .OutputToFile(newFilePath, false, options => options
-                            .WithAudioCodec(AudioCodec.LibVorbis)
-                            .WithCustomArgument($"-qscale:a {_VBROptionIndexToNumber[_oggVBROptionIndex]}"));
-                            
-                    var totalTime = FFProbe.Analyse(filePath).Duration;
-                    argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                    argumentProcessor.NotifyOnError(Console.WriteLine);
+                            .WithAudioCodec(FFMpeg.GetCodec("libopus"))
+                            .WithCustomArgument("-vbr on")
+                            .WithCustomArgument($"-b:a {_oggVBRBitrate}k"));
                     
-                    _progress = 0;
+                    var report = new ConversionReport(
+                        inputContainer, 
+                        inputAudioCodec, 
+                        "ogg", 
+                        "opus", 
+                        filePath, 
+                        newFilePath, 
+                        argumentProcessor,
+                        report => reports.Remove(report));
                     
-                    argumentProcessor
-                        .ProcessAsynchronously()
-                        .ContinueWith(_ =>
-                        {
-                            _processing = false;
-                            _statusText = "Converted to ogg.";
-                            _outputFileURL = newFilePath;
-                        });
+                    reports.Add(report);
                 }
             }
             
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(150);
-            ImGui.Combo("Bitrate##ogg", ref _oggVBROptionIndex, _oggVBROptions, _oggVBROptions.Length);
+            ImGui.SetNextItemWidth(100);
             
-            if (_oggVBROptionIndex > 10)
-                ImGui.Text($"WARNING - {_oggVBROptions[_oggVBROptionIndex]} is only supported on aoTuVb3 and newer.");
-                
+            ImGui.InputInt("Bitrate (kbit/s)##ogg", ref _oggVBRBitrate, 32);
+            _oggVBRBitrate = Math.Clamp(_oggVBRBitrate, 6, 510);
         }
     }
     
     static int _vidContComboIndex = 0;
     static string[] _vidContOptions = [
-        "MP4", "MKV", "MOV", "AVI", "WEBM"
+        "MP4", "MKV",
+        // "MOV", "AVI", "WEBM"
     ];
     
     static int _mp4VidEncComboIndex = 0;
@@ -851,6 +803,13 @@ class Program
 
     unsafe private static void VideoUI()
     {
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + 400);
+        ImGui.TextWrapped("Recommendations:\n" +
+            "- High or low quality: AV1 svt;\n" +
+            "- High or low quality but PAINFULLY SLOW: AV1 libaom;\n" +
+            "- Compatibility/fast: MP4 h264.");
+        ImGui.PopTextWrapPos();
+        
         ImGui.PushItemWidth(220);
         
         if (ImGui.Combo("Conainer", ref _vidContComboIndex, _vidContOptions, _vidContOptions.Length))
@@ -861,6 +820,7 @@ class Program
         switch (_vidContComboIndex)
         {
             case 0: // MP4
+            case 1: // MKV
             
             if (ImGui.Combo("Video Codec", ref _mp4VidEncComboIndex, _mp4VidCodecComboOptions, _mp4VidCodecComboOptions.Length))
             {
@@ -998,8 +958,14 @@ class Program
         {
             if (SelectFile(out var filePath, out var newFilePath, $"_{_selectedContAndCodecStr}-output.{_selectedContainerStr}"))
             {
-                _processing = true;
-                _outputFileURL = "";
+                var inputFileInfo = FFProbe.Analyse(filePath);
+                var inputContainer = Path.GetExtension(filePath).TrimStart('.');
+                var inputVideoCodec = inputFileInfo.PrimaryVideoStream?.CodecName ?? "unknown";
+                var inputAudioCodec = inputFileInfo.PrimaryAudioStream?.CodecName ?? "unknown";
+                
+                // Extract the video codec from the selected configuration
+                var outputVideoCodec = _mp4VidCodecs[_mp4VidEncComboIndex];
+                var outputAudioCodec = "aac"; // Default audio codec for most video containers
 
                 var argumentProcessor = FFMpegArguments
                     .FromFileInput(filePath)
@@ -1016,20 +982,19 @@ class Program
                             options.WithFramerate(_videoFrameRate);
                     });
                 
-                var totalTime = FFProbe.Analyse(filePath).Duration;
-                argumentProcessor.NotifyOnProgress(p => _progress = p, totalTime);
-                argumentProcessor.NotifyOnError(Console.WriteLine);
+                var report = new ConversionReport(
+                    inputContainer, 
+                    inputVideoCodec, 
+                    inputAudioCodec, 
+                    _selectedContainerStr, 
+                    outputVideoCodec, 
+                    outputAudioCodec, 
+                    filePath, 
+                    newFilePath, 
+                    argumentProcessor,
+                    report => reports.Remove(report));
                 
-                _progress = 0;
-                
-                argumentProcessor
-                    .ProcessAsynchronously()
-                    .ContinueWith(_ =>
-                    {
-                        _processing = false;
-                        _statusText = $"Converted to {_selectedContAndCodecStr}.";
-                        _outputFileURL = newFilePath;
-                    });
+                reports.Add(report);
             }
         }
     }
